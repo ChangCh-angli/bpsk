@@ -1,0 +1,11 @@
+# 生成文件
+rtl/rrc_taps.mem
+scripts/rrc_taps_dec.txt
+
+# 仿真产物
+tb/golden_bpsk
+tb/golden_out.hex
+tb/sim.vvp
+tb/wave.vcd
+*.vcd
+*.vvp
