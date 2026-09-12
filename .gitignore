@@ -1,6 +1,5 @@
-# 生成文件
-rtl/rrc_phases.mem
-scripts/rrc_phases_dec.txt
+# 生成文件(rtl/rrc_phases.mem 与 scripts/rrc_phases_dec.txt 为确定性产物,随库提交,
+# 供克隆后直接综合/仿真;改动生成参数后务必 make taps 重生成并一并提交)
 
 # 仿真产物
 tb/golden_bpsk
