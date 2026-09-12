@@ -1,4 +1,6 @@
 # 生成文件
+rtl/rrc_phases.mem
+scripts/rrc_phases_dec.txt
 
 # 仿真产物
 tb/golden_bpsk
