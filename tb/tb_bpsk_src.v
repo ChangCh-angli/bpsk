@@ -47,6 +47,14 @@ module tb_bpsk_src;
     reg signed [12:0] gold [0:MAX_N-1];
     initial $readmemh("tb/golden_out.hex", gold);
 
+    // +dump=<file>:逐样本导出十进制采样,供信号处理分析(fft/evm 等)
+    integer dump_fd = 0;
+    reg [1023:0] dump_file;
+    initial begin
+        if ($value$plusargs("dump=%s", dump_file))
+            dump_fd = $fopen(dump_file, "w");
+    end
+
     integer n         = 0;
     integer errs      = 0;
     integer maxrtl    = 0;
@@ -80,11 +88,15 @@ module tb_bpsk_src;
 
                 if (out_sample > maxrtl) maxrtl = out_sample;
                 if (out_sample < minrtl) minrtl = out_sample;
+                if (dump_fd)
+                    $fwrite(dump_fd, "%0d\n", out_sample);
 
                 n = n + 1;
                 if (n >= n_samples) begin
                     // integer*integer 会溢出 32 位,用 real 计算
                     exp_strobes = n * 350469331.0 / 4294967296.0;
+                    if (dump_fd)
+                        $fclose(dump_fd);
                     if (mode_nrz)
                         $display("NRZ smoke: %0d samples | max=%0d min=%0d (expect +amp/-amp) | strobes=%0d expected=%0d",
                                  n, maxrtl, minrtl, strobes, exp_strobes);

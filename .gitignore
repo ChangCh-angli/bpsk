@@ -7,5 +7,6 @@ tb/golden_bpsk
 tb/golden_out.hex
 tb/sim.vvp
 tb/wave.vcd
+tb/rtl_samples.txt
 *.vcd
 *.vvp
