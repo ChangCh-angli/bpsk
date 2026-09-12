@@ -19,7 +19,7 @@ module tb_bpsk_src;
     reg mode_nrz = 1'b0;
 
     integer    n_samples = 2000000;
-    reg [12:0] amp       = 13'd2797;
+    reg [12:0] amp       = 13'd2830;
 
     // 100 MHz
     always #5 clk = ~clk;
@@ -28,7 +28,7 @@ module tb_bpsk_src;
     wire signed [12:0] out_sample;
     wire               sym_strobe;
 
-    bpsk_src_top #(.TAP_FILE("rtl/rrc_taps.mem")) dut (
+    bpsk_src_top #(.PHASE_FILE("rtl/rrc_phases.mem")) dut (
         .clk       (clk),
         .rst_n     (rst_n),
         .mode_nrz  (mode_nrz),
@@ -40,7 +40,7 @@ module tb_bpsk_src;
 
     initial begin
         if (!$value$plusargs("n=%d",   n_samples)) n_samples = 2000000;
-        if (!$value$plusargs("amp=%d", amp))       amp       = 13'd2797;
+        if (!$value$plusargs("amp=%d", amp))       amp       = 13'd2830;
         if ($test$plusargs("nrz"))                 mode_nrz  = 1'b1;
     end
 

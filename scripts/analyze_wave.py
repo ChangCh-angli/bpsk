@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """BPSK 信号源波形质量分析:时域 / 频谱 / 解调 EVM 及误差分解 / CCDF / 眼图。
 
+适配分数延迟相位合成架构(51 相位 × 149 阶,±6 码元)。
+
 输入:tb 导出的十进制采样文本(tb_bpsk_src.v +dump=...)
-输出:docs/figs/ 下 5 张 PNG + docs/波形质量报告.md + 关键指标打印
+输出:docs/figs/ 下 5 张 PNG + 关键指标打印
 
 用法: python3 scripts/analyze_wave.py tb/rtl_samples.txt 2000000
 """
@@ -15,16 +17,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import signal
+from scipy.interpolate import CubicSpline
 
 FS = 50e6                      # 输出采样率
 RS = 4.08e6                    # 码元速率
-SPS = FS / RS                  # 12.2549
+SPS = FS / RS                  # 12.2549 = 625/51
 FTW = 350469331
 ALPHA = 0.35
-NTAPS = 99
-CENTER = 49
-FRAC = 14
-AMP = 2797                     # 幅度寄存器默认值
+NTAPS = 149                    # ±6 码元
+CENTER = 74
+PHASES = 51
+TAP_FRAC = 14
+AMP = 2830                     # 幅度寄存器默认值(全周期零削顶)
 FS_CODE = 4095                 # 13-bit 满量程
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,40 +49,77 @@ def rrc(t):
     t = np.asarray(t, dtype=np.float64)
     q = 4.0 * ALPHA * t
     with np.errstate(divide="ignore", invalid="ignore"):
-        h = (np.sin(np.pi * t * (1 - ALPHA)) + q * np.cos(np.pi * t * (1 + ALPHA))) \
-            / (np.pi * t * (1 - q * q))
+        h = (np.sin(np.pi * t * (1.0 - ALPHA)) + q * np.cos(np.pi * t * (1.0 + ALPHA))) \
+            / (np.pi * t * (1.0 - q * q))
     return np.where(np.abs(t) < 1e-12, 1.0 - ALPHA + 4.0 * ALPHA / np.pi, h)
 
 
-def make_taps():
-    n = np.arange(NTAPS)
-    hf = rrc((n - CENTER) / SPS)
-    hf = hf / hf[CENTER]                                   # 浮点理想(峰值归一)
-    gq = np.array([int(v * 2**FRAC + 0.5) if v >= 0 else -int(-v * 2**FRAC + 0.5)
-                   for v in hf], dtype=np.float64) / 2**FRAC   # Q1.14 量化
-    return hf, gq
+def make_taps(span=6.0):
+    """理想浮点 ±span 码元 RRC(峰值归一)。"""
+    half = round(span * SPS)
+    n = np.arange(2 * half + 1)
+    h = rrc((n - half) / SPS)
+    return h / h[half], half
+
+
+def phase_table():
+    """51×149 Q1.14 相位系数表,读取生成的 dec 文件保证与 RTL 同源。"""
+    dec = os.path.join(ROOT, "scripts", "rrc_phases_dec.txt")
+    v = np.loadtxt(dec, dtype=np.int64)
+    assert len(v) == PHASES * NTAPS, "phase table size mismatch, 先跑 make taps"
+    return v.reshape(PHASES, NTAPS).astype(np.float64) / 2**TAP_FRAC
 
 
 def strobes_and_data(n_samp):
-    """码元边界位置与 ±1 数据,与 RTL 精确一致(种子=1)。"""
-    m = np.arange(1, n_samp * FTW // 2**32 + 1, dtype=np.uint64)
-    nm = ((m * (np.uint64(1) << np.uint64(32)) + np.uint64(FTW - 1))
-          // np.uint64(FTW)).astype(np.int64) - 1
-    lfsr, d, ds = 1, -1, np.empty(len(nm), dtype=np.float64)
-    for k in range(len(nm)):
+    """码元边界、分数偏移 f、相位索引、±1 数据,与 RTL 精确一致(种子=1)。
+
+    边界后余量 r = (nm+1)*FTW - m*2^32 ∈ [0,FTW)(每个采样步进一次 FTW,
+    第 m 次回绕发生在采样 nm 处,共 nm+1 次累加);f = 1 - r/FTW;
+    phi = (FTW-1-r)*51 >> 32,与 RTL/golden 的组合逻辑逐位一致。
+    """
+    M = int(n_samp * FTW // 2**32)
+    m = np.arange(1, M + 1, dtype=np.int64)
+    nm = ((m << 32) + FTW - 1) // FTW - 1        # = ceil(m*2^32/FTW) - 1
+    r = (nm + 1) * FTW - (m << 32)
+    assert np.all((r >= 0) & (r < FTW)), "NCO 余量越界,公式与 RTL 不一致"
+    phi = ((FTW - 1 - r) * PHASES * 100392) >> 45   # 与 RTL/golden 的 magic 除法一致
+    f = 1.0 - r / FTW                                          # 分数偏移 ∈ [0,1)
+    lfsr, d, ds = 1, -1, np.empty(M, dtype=np.float64)
+    for k in range(M):
         ds[k] = d
         fb = ((lfsr >> 22) ^ (lfsr >> 17)) & 1
         lfsr = ((lfsr << 1) | fb) & 0x7FFFFF
         d = -1.0 if (lfsr & 1) else 1.0
-    return nm, ds
+    return nm, f, phi, ds
 
 
-def evm_at(y, nm, ds, off, k_lo, k_hi):
-    yk = y[nm[k_lo:k_hi] + off]
-    dk = ds[k_lo:k_hi]
+def inject_exact(xa, nm, f, ds, h, half):
+    """精确分数延迟注入(连续时间理想,无相位量化)。末尾越界注入不影响界内输出,截去。"""
+    peak = 1.0 - ALPHA + 4.0 * ALPHA / np.pi
+    for j in range(len(h)):
+        idx = nm + j
+        msk = idx < len(xa)
+        np.add.at(xa, idx[msk], (ds * rrc((j - half - f) / SPS) / peak)[msk])
+
+
+def inject_table(xa, nm, ds, phi, table):
+    """51 相位查表注入(与 RTL 同构)。末尾越界注入不影响界内输出,截去。"""
+    for j in range(table.shape[1]):
+        idx = nm + j
+        msk = idx < len(xa)
+        np.add.at(xa, idx[msk], (ds * table[phi, j])[msk])
+
+
+def sample_frac(y, pos):
+    """三次插值取样(匹配滤波输出峰值在分数位置)。"""
+    i0 = np.floor(pos).astype(np.int64)
+    cs = CubicSpline(np.arange(len(y)), y)
+    return cs(pos)
+
+
+def evm_at(yk, dk):
     g = np.mean(yk * dk)
-    err = yk - g * dk
-    return np.sqrt(np.mean(err**2)) / g, g
+    return np.sqrt(np.mean((yk - g * dk) ** 2)) / g, g
 
 
 def main():
@@ -89,10 +130,13 @@ def main():
 
     x = np.loadtxt(src, dtype=np.float64)
     assert len(x) == n_samp, f"样本数 {len(x)} != {n_samp}"
-    hf, gq = make_taps()
-    nm, ds = strobes_and_data(n_samp)
+    h, half = make_taps()
+    table = phase_table()
+    nm, f, phi, ds = strobes_and_data(n_samp)
     M = len(nm)
     rms = np.sqrt(np.mean(x**2))
+    t_m = nm + f                                  # 连续理想码元位置
+    k_lo, k_hi = 100, M - 100
     print(f"样本 {len(x)},码元 {M},rms = {rms:.2f} LSB,幅度 = {AMP}")
 
     # ---------- 图1 时域 ----------
@@ -101,7 +145,7 @@ def main():
     ax.plot(np.arange(n0, n1), x[n0:n1], lw=1.0, color="#0a6ebd")
     for ns in nm[(nm >= n0) & (nm < n1)]:
         ax.axvline(ns, color="gray", lw=0.4, alpha=0.5)
-    ax.axhline(AMP, color="green", lw=0.7, ls=":", label="+A / −A (±2797)")
+    ax.axhline(AMP, color="green", lw=0.7, ls=":", label="+A / −A (±2830)")
     ax.axhline(-AMP, color="green", lw=0.7, ls=":")
     ax.axhline(FS_CODE, color="red", lw=0.7, ls="--", label="满量程 ±4095")
     ax.axhline(-FS_CODE, color="red", lw=0.7, ls="--")
@@ -115,20 +159,20 @@ def main():
     plt.close(fig)
 
     # ---------- 图2 频谱(Welch PSD) ----------
-    f, pxx = signal.welch(x, fs=FS, window="hamming", nperseg=2**16,
-                          noverlap=2**15, return_onesided=False, detrend="constant")
-    order = np.argsort(f)
-    f, pxx = f[order] / 1e6, pxx[order]
+    fw, pxx = signal.welch(x, fs=FS, window="hamming", nperseg=2**16,
+                           noverlap=2**15, return_onesided=False, detrend="constant")
+    order = np.argsort(fw)
+    fw, pxx = fw[order] / 1e6, pxx[order]
     pxx_db = 10 * np.log10(pxx / 4096**2 + 1e-30)   # dBFS/Hz(满量程 4096)
     edge = RS * (1 + ALPHA) / 2 / 1e6               # 2.754 MHz
-    inb = np.abs(f) < edge
-    oob1 = (np.abs(f) >= edge) & (np.abs(f) < 8.0)
-    oob2 = np.abs(f) >= 8.0
-    p_in, p_o1, p_o2 = (np.trapezoid(pxx[w], f[w]) for w in (inb, oob1, oob2))
-    floor = np.median(pxx_db[np.abs(f) > 12])
+    inb = np.abs(fw) < edge
+    oob1 = (np.abs(fw) >= edge) & (np.abs(fw) < 8.0)
+    oob2 = np.abs(fw) >= 8.0
+    p_in, p_o1, p_o2 = (np.trapezoid(pxx[w], fw[w]) for w in (inb, oob1, oob2))
+    floor = np.median(pxx_db[np.abs(fw) > 12])
 
     fig, ax = plt.subplots(figsize=(10, 4.8), constrained_layout=True)
-    ax.plot(f, pxx_db, lw=0.7, color="#0a6ebd")
+    ax.plot(fw, pxx_db, lw=0.7, color="#0a6ebd")
     ax.axvspan(-edge, edge, color="green", alpha=0.08)
     ax.axvline(edge, color="green", ls="--", lw=0.8)
     ax.axvline(-edge, color="green", ls="--", lw=0.8)
@@ -146,69 +190,59 @@ def main():
     ax.legend(loc="lower center", fontsize=9)
     fig.savefig(os.path.join(figdir, "fig2_spectrum.png"), dpi=140)
     plt.close(fig)
-    spec = dict(mainlobe=2 * edge, floor=floor,
-                p_in=p_in, p_oob=(p_o1 + p_o2),
-                oob_ratio=10 * np.log10((p_o1 + p_o2) / p_in))
-    print(f"频谱: 主瓣 {spec['mainlobe']:.3f} MHz, 噪声底 {floor:.1f} dBFS/Hz, "
-          f"带外/带内功率比 {spec['oob_ratio']:.1f} dB")
+    print(f"频谱: 主瓣 {2*edge:.3f} MHz, 噪声底 {floor:.1f} dBFS/Hz, "
+          f"带外/带内功率比 {10*np.log10((p_o1+p_o2)/p_in):.1f} dB")
 
     # ---------- 图3 解调 / EVM 及误差分解 ----------
-    taps_rx = hf                                   # 接收端匹配滤波(浮点理想)
-    y = np.convolve(x, taps_rx)                    # y[m] = Σ taps_rx[j]·x[m−j]
-    # 对齐扫描:找 |Σ y·d| 最大的整数延迟
-    k_lo, k_hi = 100, M - 100
-    best = (-1, 0)
-    for off in range(-150, 151):
-        c = abs(np.dot(y[nm[k_lo:k_hi] + off], ds[k_lo:k_hi]))
-        if c > best[0]:
-            best = (c, off)
-    off_best = best[1]
-    evm_meas, gain = evm_at(y, nm, ds, off_best, k_lo, k_hi)
-    yk0 = y[nm[k_lo:k_hi] + off_best]
-    dk0 = ds[k_lo:k_hi]
-    evm_peak = np.max(np.abs(yk0 - gain * dk0)) / gain
+    y = np.convolve(x, h)                          # RTL 链匹配滤波(浮点理想 MF)
+    tk = t_m + 2 * half
+    yRk_all = sample_frac(y, tk)
+    yRk = yRk_all[k_lo:k_hi]
+    dk = ds[k_lo:k_hi]
+    evm_meas, gain = evm_at(yRk, dk)
+    evm_peak = np.max(np.abs(yRk - gain * dk)) / gain
 
-    # 分解:各误差源在符号级直接作差(避免被主导项淹没)
-    #   A 链:浮点理想抽头(仅 RRC ±4 截断 ISI)
-    #   B 链:Q1.14 抽头(A 与 B 之差 = 抽头量化)
-    #   RTL:x 即 RTL 输出(B 与 RTL 之差 = 13bit 输出量化 + 取整)
-    imp = np.zeros(n_samp)
-    imp[nm[:M]] = ds
-    xa = np.convolve(imp, hf)[:n_samp]
-    yA = np.convolve(xa, taps_rx)
-    evm_a, _ = evm_at(yA, nm, ds, off_best, k_lo, k_hi)
-    xb = np.convolve(imp, gq)[:n_samp]
-    yB = np.convolve(xb, taps_rx)
-    yAk = yA[nm[k_lo:k_hi] + off_best]
-    yBk = yB[nm[k_lo:k_hi] + off_best]
-    yRk = y[nm[k_lo:k_hi] + off_best]
-    dref = ds[k_lo:k_hi]
-    g0 = np.mean(yAk * dref)
-    evm_tapq = np.sqrt(np.mean((yBk - yAk) ** 2)) / g0
-    # RTL 输出在 AMP 缩放域,先做最小二乘增益对齐再作差
-    g_rtl = np.mean(yRk * dref)
-    yBn = yBk * (g_rtl / np.mean(yBk * dref))
-    evm_quant = np.sqrt(np.mean((yRk - yBn) ** 2)) / g_rtl
-    evm_comb = np.sqrt(evm_a**2 + evm_tapq**2 + evm_quant**2)
+    # 分解:
+    #   A 链:精确分数延迟注入 + 浮点抽头(仅截断 ISI)
+    #   B 链:51 相位 Q1.14 查表注入(A/B 之差 = 相位量化+残余抖动)
+    #   RTL:实测(B 与 RTL 之差 = 13bit 输出量化+取整)
+    xa = np.zeros(n_samp)
+    inject_exact(xa, nm, f, ds, h, half)
+    yA = np.convolve(xa, h)
+    yAk = sample_frac(yA, tk)[k_lo:k_hi]
+    evm_isi, _ = evm_at(yAk, dk)
+    gA = np.mean(yAk * dk)
 
-    offsets = np.arange(off_best - 6, off_best + 7)
-    evm_curve = [evm_at(y, nm, ds, int(o), k_lo, k_hi)[0] for o in offsets]
+    xb = np.zeros(n_samp)
+    inject_table(xb, nm, ds, phi, table)
+    yB = np.convolve(xb, h)
+    yBk = sample_frac(yB, tk)[k_lo:k_hi]
+    evm_ph = np.sqrt(np.mean((yBk - yAk) ** 2)) / gA
+
+    yBn = yBk * (gain / np.mean(yBk * dk))
+    evm_quant = np.sqrt(np.mean((yRk - yBn) ** 2)) / gain
+    evm_comb = np.sqrt(evm_isi**2 + evm_ph**2 + evm_quant**2)
+
+    offsets = np.arange(-6, 7)
+    evm_curve = []
+    for o in offsets:
+        yk_o = sample_frac(y, tk + o)[k_lo:k_hi]
+        evm_curve.append(evm_at(yk_o, dk)[0])
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.4), constrained_layout=True)
-    ax1.semilogy(offsets - off_best, np.array(evm_curve) * 100, "o-", ms=4, color="#0a6ebd")
+    ax1.semilogy(offsets, np.array(evm_curve) * 100, "o-", ms=4, color="#0a6ebd")
     ax1.set_xlabel("采样相位偏移 (采样)")
     ax1.set_ylabel("EVM_RMS (%)")
-    ax1.set_title(f"匹配滤波后 EVM 对采样相位的敏感度\n(最优相位 = 码元边界 +{off_best})")
+    ax1.set_title("匹配滤波后 EVM 对采样相位的敏感度\n(0 = 连续理想码元位置)")
     ax1.grid(alpha=0.3, which="both")
-    items = [("RRC ±4 码元截断 (ISI)", evm_a),
-             ("抽头 Q1.14 量化", evm_tapq),
+    items = [("RRC ±6 码元截断 (ISI)", evm_isi),
+             ("51 相位量化+残余抖动", evm_ph),
              ("13-bit 输出量化+取整", evm_quant),
              ("实测总计 (RTL)", evm_meas)]
-    names = [i[0] for i in items]
     vals_db = [20 * np.log10(i[1]) for i in items]
     bars = ax2.bar(range(len(items)), vals_db, color=["#88b8d8", "#88b8d8", "#88b8d8", "#c44e52"])
     ax2.set_xticks(range(len(items)))
-    ax2.set_xticklabels(["RRC截断\n(ISI)", "抽头\nQ1.14", "13bit\n量化", "实测\n总计"], fontsize=9)
+    ax2.set_xticklabels(["RRC截断\n(ISI)", "相位量化\n+残余抖动", "13bit\n量化", "实测\n总计"], fontsize=9)
     for b, v in zip(bars, vals_db):
         ax2.text(b.get_x() + b.get_width() / 2, v - 6, f"{v:.1f} dB",
                  ha="center", fontsize=9, color="black")
@@ -220,19 +254,14 @@ def main():
                  f"({20*np.log10(evm_meas):.1f} dB),  EVM_peak = {evm_peak*100:.3f} %", fontsize=11)
     fig.savefig(os.path.join(figdir, "fig3_evm.png"), dpi=140)
     plt.close(fig)
-    yk = y[nm[k_lo:k_hi] + off_best]
-    dk = ds[k_lo:k_hi]
-    g = np.mean(yk * dk)
-    evm_peak = np.max(np.abs(yk - g * dk)) / g
     print(f"EVM: RMS {evm_meas*100:.4f}% ({20*np.log10(evm_meas):.1f} dB), "
-          f"peak {evm_peak*100:.3f}%, 对齐延迟 {off_best}, 合成校验 "
-          f"{evm_comb*100:.4f}% (实测 {evm_meas*100:.4f}%), "
-          f"截断ISI {evm_a:.2e} / 抽头量化 {evm_tapq:.2e} / 13bit量化 {evm_quant:.2e}")
+          f"peak {evm_peak*100:.3f}%, 合成校验 {evm_comb*100:.4f}% (实测 {evm_meas*100:.4f}%)")
+    print(f"  截断ISI {evm_isi:.2e} / 相位量化+残余抖动 {evm_ph:.2e} / 13bit量化 {evm_quant:.2e}")
 
     # ---------- 图4 CCDF ----------
     ax_abs = np.sort(np.abs(x))
     t_db = np.arange(0, 8.001, 0.01)
-    thr = rms * 10 ** (t_db / 20)   # 幅度 dB:20log10
+    thr = rms * 10 ** (t_db / 20)
     ccdf = 1.0 - np.searchsorted(ax_abs, thr) / len(ax_abs)
     crest = 20 * np.log10(np.max(np.abs(x)) / rms)
     margin_fs = 20 * np.log10(FS_CODE / rms)
@@ -259,8 +288,8 @@ def main():
     w_l, w_r = 6, 18          # 码元边界前 6 / 后 18 采样 ≈ ±0.5T
     rows = []
     for k in range(500, min(1700, M - 100)):
-        s = nm[k] + off_best
-        if s - w_l < 0 or s + w_r >= len(y):
+        s = nm[k] + half
+        if s - w_l - half < 0 or s + w_r >= len(y):
             continue
         rows.append(y[s - w_l: s + w_r])
     seg = np.array(rows)
@@ -275,7 +304,6 @@ def main():
     fig.savefig(os.path.join(figdir, "fig5_eye.png"), dpi=140)
     plt.close(fig)
 
-    # ---------- 汇总 ----------
     print("DONE")
 
 
