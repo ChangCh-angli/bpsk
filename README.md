@@ -44,7 +44,7 @@ rtl/pn23_gen.v          PN23 序列发生器(参数化种子,须非零)
 rtl/sym_timing_nco.v    码元定时 NCO(参数化 FTW)
 rtl/rrc_pulse.v         RRC 成形器 + 输出定标 + NRZ 旁路
 rtl/bpsk_src_top.v      顶层
-rtl/rrc_phases.mem     51×149 分数延迟相位系数表(由脚本生成)
+rtl/rrc_pulse.v        相位系数表以可综合 case 函数内嵌(标记段由脚本生成)
 scripts/gen_rrc_taps.py 相位系数表生成(Q1.14,含位宽校验)
 scripts/golden_bpsk.c   定点逐位 golden model(与 RTL 同构)
 tb/tb_bpsk_src.v        自检测 testbench(逐位比对 + 节拍/幅度检查)
@@ -75,6 +75,7 @@ vvp tb/sim.vvp +n=2000000 +vcd             # 输出 tb/wave.vcd 波形
 - `rrc_pulse` 的累加运算全部经由有符号中间变量完成。不要把 `tap[i]` 直接混入
   含无符号操作数(如未加 `$signed` 的拼接常量)的表达式——Verilog 会把整条
   表达式按无符号求值,负抽头将被零扩展而出错。
-- 相位系数表由 `scripts/gen_rrc_taps.py` 生成,改 α/跨度/相位数/位宽后需同步修改
-  `rrc_pulse.v` 的 `NTAPS/PHASES/TAP_W/TAP_FRAC/ACC_W`、`golden_bpsk.c` 对应常量,以及
-  `sym_timing_nco.v` 中的 magic number `M = floor(2^45/FTW)`,并重跑 `make` 全量回归。
+- 相位系数表以内嵌 case 函数形式固化在 `rrc_pulse.v`(无 initial/$readmemh,纯可综合)。
+  改 α/跨度/相位数/位宽后:改 `scripts/gen_rrc_taps.py` 常量 → `make taps` 重生成 →
+  同步 `golden_bpsk.c` 对应常量与 `sym_timing_nco.v` 的 magic number `M = floor(2^45/FTW)`,
+  并重跑 `make` 全量回归。

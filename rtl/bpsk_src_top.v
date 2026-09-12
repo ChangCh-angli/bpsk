@@ -11,9 +11,8 @@
 // 幅度与波形峰值绑定,改动成形参数后需用 make peak 复核)。
 // mode_nrz = 1 输出未成形的 NRZ 阶梯波,供链路分段调试。
 module bpsk_src_top #(
-    parameter [22:0]  PN_SEED   = 23'h000001,
-    parameter [31:0]  FTW       = 32'd350469331,
-    parameter         PHASE_FILE = "rtl/rrc_phases.mem"
+    parameter [22:0]  PN_SEED  = 23'h000001,
+    parameter [31:0]  FTW      = 32'd350469331
 ) (
     input  wire                      clk,        // 100 MHz(50 MHz 的 2 倍)
     input  wire                      rst_n,      // 异步低有效
@@ -46,7 +45,7 @@ module bpsk_src_top #(
         .clk(clk), .rst_n(rst_n), .sym_strobe(sym_strobe), .pn_bit(pn_bit)
     );
 
-    rrc_pulse #(.PHASE_FILE(PHASE_FILE)) u_shaper (
+    rrc_pulse #() u_shaper (
         .clk       (clk),
         .rst_n     (rst_n),
         .ce        (ce),

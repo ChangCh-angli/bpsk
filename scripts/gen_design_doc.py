@@ -194,7 +194,8 @@ def main():
     doc.add_heading("4.3 rrc_pulse(成形与定标)", level=2)
     doc.add_paragraph(
         "149 阶 Q1.14 抽头在 50 MHz 采样域按 t/T = n/12.2549 取样(峰值归一),51 个分数"
-        "延迟相位由 scripts/gen_rrc_taps.py 生成并经 $readmemh 加载。核内 149 级 20-bit 累加器做"
+        "延迟相位由 scripts/gen_rrc_taps.py 生成,以可综合的两级 case 函数内嵌于 rrc_pulse.v"
+        "(无 initial/$readmemh)。核内 149 级 20-bit 累加器做"
         "条件常数加减;输出级完成幅度乘法、round-half-up 取整与 ±4096 饱和:"
     )
     code_par(doc,
@@ -292,7 +293,7 @@ def main():
                ["rtl/sym_timing_nco.v", "码元定时 NCO"],
                ["rtl/rrc_pulse.v", "RRC 成形器 + 输出定标 + NRZ 旁路"],
                ["rtl/bpsk_src_top.v", "顶层"],
-               ["rtl/rrc_phases.mem", "51×149 分数延迟相位系数表(脚本生成)"],
+               ["rtl/rrc_pulse.v 内嵌相位函数", "51×149 系数以可综合 case 内嵌(脚本标记段自动生成)"],
                ["scripts/gen_rrc_taps.py", "相位系数表生成(Q1.14,含位宽校验)"],
                ["scripts/golden_bpsk.c", "定点逐位 golden model"],
                ["scripts/gen_design_doc.py", "本说明书的生成脚本"],

@@ -28,7 +28,7 @@ module tb_bpsk_src;
     wire signed [12:0] out_sample;
     wire               sym_strobe;
 
-    bpsk_src_top #(.PHASE_FILE("rtl/rrc_phases.mem")) dut (
+    bpsk_src_top dut (
         .clk       (clk),
         .rst_n     (rst_n),
         .mode_nrz  (mode_nrz),
