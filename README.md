@@ -56,7 +56,7 @@ tb/tb_bpsk_src.v        自检测 testbench(逐位比对 + 节拍/幅度检查)
 make            # 生成抽头 -> golden -> 2M 采样逐位比对
 make peak       # golden 跑完整 PN23 周期(1.028 亿采样),复核零削顶
 make lint       # verilator lint
-vvp tb/sim.vvp +n=100000 +amp=2797 +nrz    # NRZ 调试模式冒烟
+vvp tb/sim.vvp +n=100000 +amp=2830 +nrz    # NRZ 调试模式冒烟
 vvp tb/sim.vvp +n=2000000 +vcd             # 输出 tb/wave.vcd 波形
 ```
 
