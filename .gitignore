@@ -1,6 +1,4 @@
 # 生成文件
-rtl/rrc_taps.mem
-scripts/rrc_taps_dec.txt
 
 # 仿真产物
 tb/golden_bpsk
@@ -10,3 +8,5 @@ tb/wave.vcd
 tb/rtl_samples.txt
 *.vcd
 *.vvp
+scripts/__pycache__/
+__pycache__/
